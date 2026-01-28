@@ -1,154 +1,116 @@
-﻿#include <iostream>
+#include <iostream>
 #include <thread>
 #include <mutex>
-#include <chrono>
 #include <vector>
-#include <cstdlib>
 #include <string>
+#include <chrono>
+#include <atomic>
 #include <algorithm>
 
 const int EXPLOSION_LIMIT = 10000;
-const int INITIAL_DISH = 3000;
-const int NUM_FAT_MEN = 3;
-const int SIMULATION_TIME_SEC = 5;
 
-std::mutex mtx;
+const int GLUTTONY = 10;
+const int EFFICIENCY_FACTOR = 11;
 
-struct Result {
-    std::string outcome;
-    std::vector<int> eaten;
-    std::vector<int> dishes;
-};
+std::vector<int> dishes = { 3000, 3000, 3000 };
+std::vector<int> eaten_food = { 0, 0, 0 };
+std::mutex shared_mutex;
+std::atomic<bool> simulation_running(true);
+std::string outcome = "Кук уволился сам! (Прошло 5 дней)";
 
-Result run_simulation(int gluttony, int efficiency) {
-    std::vector<int> dishes(NUM_FAT_MEN, INITIAL_DISH);
-    std::vector<int> eaten(NUM_FAT_MEN, 0);
-    bool running = true;
-    std::string outcome = "Не все съели";
-
-    auto cook = std::thread([&]() {
-        while (running) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            std::lock_guard<std::mutex> lock(mtx);
-            if (!running) break;
-            for (int i = 0; i < NUM_FAT_MEN; ++i) {
-                dishes[i] += efficiency;
+void cook_thread() {
+    while (simulation_running) {
+        shared_mutex.lock();
+        if (simulation_running) {
+            for (int i = 0; i < 3; ++i) {
+                dishes[i] += EFFICIENCY_FACTOR;
             }
         }
-        });
-    
-    std::vector<std::thread> eaters;
-    for (int id = 0; id < NUM_FAT_MEN; ++id) {
-        eaters.emplace_back([&, id]() {
-            while (running) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                std::lock_guard<std::mutex> lock(mtx);
-                if (!running) break;
+        shared_mutex.unlock();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
 
-                if (eaten[id] >= EXPLOSION_LIMIT) {
-                    continue;
-                }
+void fat_man_thread(int id) {
+    while (simulation_running) {
+        shared_mutex.lock();
+        if (!simulation_running) {
+            shared_mutex.unlock();
+            break;
+        }
 
-                int room = EXPLOSION_LIMIT - eaten[id];
-                int available = dishes[id];
-                int take = std::min({ gluttony, room, available });
+        if (eaten_food[id] >= EXPLOSION_LIMIT) {
+            shared_mutex.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
 
-                if (take > 0) {
-                    dishes[id] -= take;
-                    eaten[id] += take;
+        int room_in_stomach = EXPLOSION_LIMIT - eaten_food[id];
+        int food_to_eat = std::min({ dishes[id], GLUTTONY, room_in_stomach });
 
-                    if (dishes[id] <= 0) {
-                        outcome = "Еда закончилась";
-                        running = false;
-                        break;
-                    }
-                }
+        if (food_to_eat > 0) {
+            dishes[id] -= food_to_eat;
+            eaten_food[id] += food_to_eat;
 
-                bool all_exploded = true;
-                for (int i = 0; i < NUM_FAT_MEN; ++i) {
-                    if (eaten[i] < EXPLOSION_LIMIT) {
-                        all_exploded = false;
-                        break;
-                    }
-                }
-                if (all_exploded) {
-                    outcome = "Все съели и взорвались";
-                    running = false;
-                    break;
-                }
+            if (dishes[id] <= 0) {
+                outcome = "Кука уволили! (Тарелка опустела)";
+                simulation_running = false;
             }
-            });
+        }
+
+        if (eaten_food[0] >= EXPLOSION_LIMIT &&
+            eaten_food[1] >= EXPLOSION_LIMIT &&
+            eaten_food[2] >= EXPLOSION_LIMIT) {
+            outcome = "Кук не получил зарплату! (Все толстяки лопнули)";
+            simulation_running = false;
+        }
+
+        shared_mutex.unlock();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
+
+struct Test {
+    int gluttony;
+    int efficiency_factor;
+};
+
+int main() {
+    setlocale(LC_ALL, "Russian");
+
+    std::vector<Test> tests = {
+        {80, 5},
+        {100, 1000},
+        {1, 2}
+    };
+
+    std::cout << "Симуляция запущена с параметрами:" << std::endl;
+    std::cout << "Обжорство (Толстяки едят): " << GLUTTONY << " еды/раз" << std::endl;
+    std::cout << "Эффективность (Повар готовит): " << EFFICIENCY_FACTOR << " еды/партия на тарелку" << std::endl;
+
+    std::thread cook(cook_thread);
+    std::vector<std::thread> fat_men;
+    for (int i = 0; i < 3; ++i) {
+        fat_men.emplace_back(fat_man_thread, i);
     }
 
-    std::this_thread::sleep_for(std::chrono::seconds(SIMULATION_TIME_SEC));
-
-    {
-        std::lock_guard<std::mutex> lock(mtx);
-        running = false;
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+    if (simulation_running) {
+        simulation_running = false;
     }
 
     cook.join();
-    for (auto& t : eaters) {
+    for (auto& t : fat_men) {
         t.join();
     }
 
-    return { outcome, eaten, dishes };
-}
-
-int main() {
-#ifdef _WIN32
-    system("chcp 1251 > nul");
-#endif
-
-    struct Test {
-        int gluttony;
-        int efficiency;
-    };
-
-    std::vector<Test> tests = {
-        {80, 5},      // Медленный повар, умеренная жадность
-        {100, 1000},  // Быстрый повар, высокая жадность
-        {1, 2}        // Очень медленный едок, медленный повар
-    };
-
-    for (size_t i = 0; i < tests.size(); ++i) {
-        std::cout << "\nТест " << (i + 1) << ":\n";
-        std::cout << "GLUTTONY = " << tests[i].gluttony
-            << ", EFFICIENCY = " << tests[i].efficiency << "\n";
-
-        Result res = run_simulation(tests[i].gluttony, tests[i].efficiency);
-
-        std::cout << "Исход: " << res.outcome << "\n";
-        std::cout << "Результаты:\n";
-
-        int total_eaten = 0;
-        int total_left = 0;
-
-        for (int j = 0; j < NUM_FAT_MEN; ++j) {
-            std::cout << "Толстяк #" << (j + 1)
-                << ": съел " << res.eaten[j]
-                << ", в тарелке " << res.dishes[j] << "\n";
-            total_eaten += res.eaten[j];
-            total_left += res.dishes[j];
-        }
-
-        std::cout << "Всего съедено: " << total_eaten << "\n";
-        std::cout << "Всего осталось: " << total_left << "\n";
-        std::cout << "Изначальная еда: " << (INITIAL_DISH * NUM_FAT_MEN) << "\n";
-
-       
-        if (res.outcome == "Все съели и взорвались") {
-            bool all_at_limit = true;
-            for (int eaten : res.eaten) {
-                if (eaten < EXPLOSION_LIMIT) {
-                    all_at_limit = false;
-                    break;
-                }
-            }
-            if (!all_at_limit) {
-                std::cout << "ВНИМАНИЕ: результат 'Все взорвались', но не все достигли лимита!\n";
-            }
-        }
+    std::cout << "Симуляция завершена!" << std::endl;
+    std::cout << "ИТОГ: " << outcome << std::endl;
+    std::cout << "Финальное состояние:" << std::endl;
+    for (int i = 0; i < 3; ++i) {
+        std::cout << "Толстяк #" << i + 1 << " съел: " << eaten_food[i]
+            << " еды. | На тарелке #" << i + 1 << " осталось: " << dishes[i]
+            << " еды." << std::endl;
     }
 
     return 0;
